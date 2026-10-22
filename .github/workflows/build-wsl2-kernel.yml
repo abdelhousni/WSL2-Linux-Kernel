@@ -90,6 +90,8 @@ jobs:
               ./scripts/config --file .config --enable CONFIG_$opt
             fi
           done
+          # B. Build everything in. No modules to install: in step 3, after copying the config, turn every =m  into =y:
+          sed -i 's/=m$/=y/' .config
           make olddefconfig
 
           # Sanity check: fail the build early if critical options didn't stick.
