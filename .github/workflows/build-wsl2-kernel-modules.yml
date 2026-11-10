@@ -1,0 +1,111 @@
+name: Build WSL2 Kernel + modules VHDX (amd64-v3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'microsoft/WSL2-Linux-Kernel ref (tag or branch)'
+        default: 'linux-msft-wsl-6.18.58.1'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      # ── 1. Build dependencies (+ qemu-utils/e2fsprogs for the VHDX) ─────
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential flex bison bc cpio kmod \
+            libssl-dev libelf-dev libncurses-dev \
+            dwarves pahole git \
+            qemu-utils e2fsprogs
+
+      # ── 2. Microsoft WSL2 kernel source, pinned to a tag ────────────────
+      - name: Checkout WSL2 kernel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/WSL2-Linux-Kernel
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      # ── 3. Config: Microsoft defaults, =m stays =m (shipped in the VHDX) ─
+      - name: Configure kernel
+        run: |
+          cp Microsoft/config-wsl .config
+          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-wsl2-x86_64-v3"/' .config
+
+          # Built in (needed before any module can load / by rootless podman / ccbox firewall)
+          for opt in \
+            TUN BRIDGE VETH \
+            NETFILTER NETFILTER_ADVANCED NETFILTER_XTABLES NETFILTER_XTABLES_LEGACY \
+            NF_CONNTRACK NF_NAT \
+            IP_NF_IPTABLES IP_NF_FILTER IP_NF_IPTABLES_LEGACY IP_NF_NAT IP_NF_MANGLE \
+            IP_NF_TARGET_MASQUERADE IP_NF_TARGET_REJECT \
+            NETFILTER_XT_MATCH_CONNTRACK NETFILTER_XT_MATCH_STATE NETFILTER_XT_MATCH_COMMENT \
+            NETFILTER_XT_MATCH_OWNER NETFILTER_XT_MATCH_MULTIPORT NETFILTER_XT_TARGET_MASQUERADE \
+            NETFILTER_XT_SET IP_SET IP_SET_HASH_NET IP_SET_HASH_IP \
+          ; do
+            ./scripts/config --file .config --enable CONFIG_$opt
+          done
+
+          # Wanted as loadable modules (k8s/kind/minikube, VMs, VPN, net, storage)
+          for opt in \
+            BRIDGE_NETFILTER IP_VS KVM KVM_INTEL KVM_AMD VHOST_NET WIREGUARD \
+            MACVLAN IPVLAN NFS_FS CIFS NFT_CT EROFS_FS \
+          ; do
+            ./scripts/config --file .config --module CONFIG_$opt
+          done
+
+          make olddefconfig
+
+          # Fail early if anything we asked for got dropped
+          for req in TUN NETFILTER_XTABLES IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT IP_NF_MANGLE IP_SET IP_SET_HASH_NET; do
+            grep -q "^CONFIG_${req}=y" .config || { echo "::error::CONFIG_${req} not =y"; exit 1; }
+          done
+          for req in MODULES BRIDGE_NETFILTER IP_VS KVM KVM_INTEL KVM_AMD VHOST_NET WIREGUARD MACVLAN IPVLAN NFS_FS CIFS NFT_CT EROFS_FS; do
+            grep -qE "^CONFIG_${req}=(y|m)" .config || { echo "::error::CONFIG_${req} not enabled"; exit 1; }
+          done
+          echo "Config OK: $(grep -c '=m$' .config) modules"
+
+      # ── 4. Kernel + modules ─────────────────────────────────────────────
+      - name: Build kernel and modules
+        run: |
+          make -j$(nproc) \
+            KCONFIG_CONFIG=.config \
+            KCFLAGS="-march=x86-64-v3 -mtune=generic" \
+            KCPPFLAGS="-march=x86-64-v3 -mtune=generic"
+          echo "KREL=$(make -s kernelrelease)" >> "$GITHUB_ENV"
+
+      # ── 5. modules + headers, then the VHDX (upstream script) ───────────
+      # perf dir left empty: WSL dropped its bundled perf integration
+      # (microsoft/WSL#41904), but the script still takes the argument.
+      - name: Package modules.vhdx
+        run: |
+          make INSTALL_MOD_PATH="$PWD/out/modules" modules_install
+          make headers_install INSTALL_HDR_PATH="$PWD/out/headers"
+          mkdir -p "$PWD/out/perf"
+          ./Microsoft/scripts/gen_artifacts_vhdx.sh \
+            "$PWD/out/modules" "$PWD/out/headers" "$PWD/out/perf" "$KREL" "$PWD/modules.vhdx"
+          mkdir dist
+          cp arch/x86/boot/bzImage dist/bzImage
+          mv modules.vhdx dist/modules.vhdx
+          cp .config dist/config
+          echo "$KREL" > dist/kernelrelease
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist; cat dist/kernelrelease
+
+      # ── 6. One artifact with everything ─────────────────────────────────
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wsl2-kernel-x86_64-v3-${{ env.KREL }}
+          path: dist/
+          retention-days: 30
