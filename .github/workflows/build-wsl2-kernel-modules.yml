@@ -7,6 +7,9 @@ on:
         description: 'microsoft/WSL2-Linux-Kernel ref (tag or branch)'
         default: 'linux-msft-wsl-6.18.58.1'
         required: true
+  push:
+    branches: [modules-vhdx]
+    paths: ['.github/workflows/build-wsl2-kernel-modules.yml']
 
 permissions:
   contents: read
@@ -32,7 +35,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: microsoft/WSL2-Linux-Kernel
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || 'linux-msft-wsl-6.18.58.1' }}
           fetch-depth: 1
           persist-credentials: false
 
