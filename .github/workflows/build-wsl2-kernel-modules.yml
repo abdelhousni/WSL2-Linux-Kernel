@@ -92,7 +92,8 @@ jobs:
       # (microsoft/WSL#41904), but the script still takes the argument.
       - name: Package modules.vhdx
         run: |
-          make INSTALL_MOD_PATH="$PWD/out/modules" modules_install
+          # INSTALL_MOD_STRIP=1: strip debug info (strip --strip-debug) from each .ko
+          make INSTALL_MOD_PATH="$PWD/out/modules" INSTALL_MOD_STRIP=1 modules_install
           make headers_install INSTALL_HDR_PATH="$PWD/out/headers"
           mkdir -p "$PWD/out/perf"
           ./Microsoft/scripts/gen_artifacts_vhdx.sh \
